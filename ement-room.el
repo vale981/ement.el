@@ -129,6 +129,12 @@ See function `format-time-string'."
   "Width of right margin in room buffers."
   :type 'integer)
 
+(defcustom ement-room-prism 'both
+  "Display users' names and messages in unique colors."
+  :type '(choice (const :tag "Name only" name)
+                 (const :tag "Name and message" both)
+                 (const :tag "Neither" nil)))
+
 (defcustom ement-room-username-display-property '(raise -0.25)
   "Display property applied to username strings.
 See Info node `(elisp)Other Display Specs'."
@@ -555,7 +561,17 @@ seconds."
 Format defaults to `ement-room-message-format-spec', which see."
   (cl-macrolet ((defspecs (&rest specs)
                   `(list ,@(cl-loop for (char form) in specs
-                                    collect `(cons ,char (lambda (event) ,form))))))
+                                    collect `(cons ,char (lambda (event) ,form)))))
+                (body-face
+                 () `(cond ((equal (ement-user-id sender)
+                                   (ement-user-id (ement-session-user ement-session)))
+                            'ement-room-self-message)
+                           ((eq 'both ement-room-prism)
+                            (list :inherit 'default
+                                  :foreground (or (ement-user-color sender)
+                                                  (setf (ement-user-color sender)
+                                                        (ement-room--user-color sender)))))
+                           (t 'default))))
     (let* ((room-buffer (current-buffer))
            (margin-p)
            (specs (defspecs
@@ -567,17 +583,13 @@ Format defaults to `ement-room-message-format-spec', which see."
                     (?b (pcase-let*
                             (((cl-struct ement-event content sender) event)
                              ((map body) content)
-                             (body-face (if (equal (ement-user-id sender)
-                                                   (ement-user-id (ement-session-user ement-session)))
-                                            'ement-room-self-message 'default)))
+                             (body-face (body-face)))
                           (add-face-text-property 0 (length body) body-face 'append body)
                           body))
                     (?B (pcase-let*
                             (((cl-struct ement-event content sender) event)
                              ((map body ('format content-format) ('formatted_body formatted-body)) content)
-                             (body-face (if (equal (ement-user-id sender)
-                                                   (ement-user-id (ement-session-user ement-session)))
-                                            'ement-room-self-message 'default))
+                             (body-face (body-face))
                              (body (if (not formatted-body)
                                        body
                                      (pcase content-format
@@ -672,10 +684,6 @@ HTML is rendered to Emacs text using `shr-insert-document'."
          (libxml-parse-html-region (point-min) (point-max)))))
     (string-trim (buffer-substring (point) (point-max)))))
 
-(defcustom ement-room-prism t
-  "Display each user's messages in a different color."
-  :type 'boolean)
-
 (cl-defun ement-room--format-user (user &optional (room ement-room))
   "Format `ement-user' USER for ROOM.
 ROOM defaults to the value of `ement-room'."
@@ -683,9 +691,9 @@ ROOM defaults to the value of `ement-room'."
                          (ement-user-id (ement-session-user ement-session)))
                   'ement-room-self
                 (if ement-room-prism
-                    `(:foreground ,(or (ement-user-color user)
-                                       (setf (ement-user-color user)
-                                             (ement-room--user-color user))))
+                    `(:inherit ement-room-user :foreground ,(or (ement-user-color user)
+                                                                (setf (ement-user-color user)
+                                                                      (ement-room--user-color user))))
                   'ement-room-user))))
     ;; FIXME: If a membership state event has not yet been received, this
     ;; sets the display name in the room to the user ID, and that prevents
@@ -703,33 +711,41 @@ For use as a `help-echo' function on `ement-user' headings."
     (ement-user-id (ewoc-data (ewoc-locate ement-ewoc pos)))))
 
 (defun ement-room--user-color (user)
-  "Return a color with which to display USER's messages."
-  (pcase-let* ((id (ement-user-id user))
-               (id-hash (float (abs (sxhash id))))
-               ;; TODO: Wrap-around the value to get the color I want.
-               (ratio (/ id-hash (float most-positive-fixnum)))
-               (color-num (round (* (* 255 255 255) ratio)))
-               (color-rgb (list (/ (float (logand color-num 255)) 255)
-                                (/ (float (lsh (logand color-num 65280) -8)) 255)
-                                (/ (float (lsh (logand color-num 16711680) -16)) 255)))
-               (color-hex (apply #'color-rgb-to-hex (append color-rgb (list 2))))
-               (`(,_h ,_s ,v) (apply #'color-rgb-to-hsv color-rgb))
-               ;; This seems to work, but shouldn't > mean lighter-than?
-               (darker-than-background-p (< v (cl-third
-                                               (apply #'color-rgb-to-hsv
-                                                      (color-name-to-rgb (face-background 'default)))))))
-    (cl-flet* ((color-v (color) (cl-third
-                                 (apply #'color-rgb-to-hsv
-                                        (color-name-to-rgb color))))
-               (contrast-p
-                (a b) (> (abs (- (color-v a) (color-v b))) 0.5)))
-      ;; FIXME: Doesn't actually ensure decent contrast.
-      (cl-loop until (contrast-p color-hex (face-foreground 'default))
-               ;; FIXME: Prevent infinite loop.
-               do (setf color-hex (if darker-than-background-p
-                                      (color-lighten-name color-hex 5)
-                                    (color-darken-name color-hex 5))))
-      color-hex)))
+  "Return a color in which to display USER's messages."
+  (cl-labels ((relative-luminance
+               ;; Copy of `rainbow-color-luminance', except it doesn't divide by 256,
+               ;; which appears to be the wrong thing to do, because with that removed,
+               ;; the relative luminance of black to white is the correct ratio of
+               ;; 21.0.  Also see <https://en.wikipedia.org/wiki/Relative_luminance>
+               ;; and <https://www.w3.org/TR/WCAG20/#relativeluminancedef>.
+               (r g b) (+ (* 0.2126 r) (* 0.7152 g) (* 0.0722 b)))
+              (contrast-ratio
+               (a b) (pcase-let* ((`(,_ah ,_as ,av) (apply #'color-rgb-to-hsv a))
+                                  (`(,_bh ,_bs ,bv) (apply #'color-rgb-to-hsv b))
+                                  (lighter-luminance (apply #'relative-luminance (if (> av bv) a b)))
+                                  (darker-luminance (apply #'relative-luminance (if (> av bv) b a))))
+                       (/ (+ 0.05 lighter-luminance)
+                          (+ 0.05 darker-luminance)))))
+    (let* ((id (ement-user-id user))
+           (id-hash (float (abs (sxhash id))))
+           ;; TODO: Wrap-around the value to get the color I want.
+           (ratio (/ id-hash (float most-positive-fixnum)))
+           (color-num (round (* (* 255 255 255) ratio)))
+           (color-rgb (list (/ (float (logand color-num 255)) 255)
+                            (/ (float (lsh (logand color-num 65280) -8)) 255)
+                            (/ (float (lsh (logand color-num 16711680) -16)) 255)))
+           (background-rgb (color-name-to-rgb (face-background 'default)))
+           (contrast-ratio (contrast-ratio color-rgb background-rgb)))
+      (if (< contrast-ratio 3)
+          (progn
+            ;; Contrast ratio too low: I don't know the best way to fix this,
+            ;; but using the complement seems to produce decent results.
+            ;; FIXME: Calculate and apply an adjustment instead.
+            (apply #'color-rgb-to-hex
+                   (append (color-complement (apply #'color-rgb-to-hex
+                                                    (append color-rgb (list 2))))
+                           (list 2))))
+        (apply #'color-rgb-to-hex (append color-rgb (list 2)))))))
 
 ;;;;; Widgets
 
