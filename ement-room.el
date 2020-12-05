@@ -34,6 +34,7 @@
 
 ;;;; Requirements
 
+(require 'color)
 (require 'ewoc)
 (require 'shr)
 (require 'subr-x)
@@ -671,11 +672,21 @@ HTML is rendered to Emacs text using `shr-insert-document'."
          (libxml-parse-html-region (point-min) (point-max)))))
     (string-trim (buffer-substring (point) (point-max)))))
 
+(defcustom ement-room-prism t
+  "Display each user's messages in a different color."
+  :type 'boolean)
+
 (cl-defun ement-room--format-user (user &optional (room ement-room))
   "Format `ement-user' USER for ROOM.
 ROOM defaults to the value of `ement-room'."
-  (let ((face (if (equal (ement-user-id user) (ement-user-id (ement-session-user ement-session)))
-		  'ement-room-self 'ement-room-user)))
+  (let ((face (if (equal (ement-user-id user)
+                         (ement-user-id (ement-session-user ement-session)))
+                  'ement-room-self
+                (if ement-room-prism
+                    `(:foreground ,(or (ement-user-color user)
+                                       (setf (ement-user-color user)
+                                             (ement-room--user-color user))))
+                  'ement-room-user))))
     ;; FIXME: If a membership state event has not yet been received, this
     ;; sets the display name in the room to the user ID, and that prevents
     ;; the display name from being used if the state event arrives later.
@@ -690,6 +701,35 @@ ROOM defaults to the value of `ement-room'."
 For use as a `help-echo' function on `ement-user' headings."
   (with-selected-window window
     (ement-user-id (ewoc-data (ewoc-locate ement-ewoc pos)))))
+
+(defun ement-room--user-color (user)
+  "Return a color with which to display USER's messages."
+  (pcase-let* ((id (ement-user-id user))
+               (id-hash (float (abs (sxhash id))))
+               ;; TODO: Wrap-around the value to get the color I want.
+               (ratio (/ id-hash (float most-positive-fixnum)))
+               (color-num (round (* (* 255 255 255) ratio)))
+               (color-rgb (list (/ (float (logand color-num 255)) 255)
+                                (/ (float (lsh (logand color-num 65280) -8)) 255)
+                                (/ (float (lsh (logand color-num 16711680) -16)) 255)))
+               (color-hex (apply #'color-rgb-to-hex (append color-rgb (list 2))))
+               (`(,_h ,_s ,v) (apply #'color-rgb-to-hsv color-rgb))
+               ;; This seems to work, but shouldn't > mean lighter-than?
+               (darker-than-background-p (< v (cl-third
+                                               (apply #'color-rgb-to-hsv
+                                                      (color-name-to-rgb (face-background 'default)))))))
+    (cl-flet* ((color-v (color) (cl-third
+                                 (apply #'color-rgb-to-hsv
+                                        (color-name-to-rgb color))))
+               (contrast-p
+                (a b) (> (abs (- (color-v a) (color-v b))) 0.5)))
+      ;; FIXME: Doesn't actually ensure decent contrast.
+      (cl-loop until (contrast-p color-hex (face-foreground 'default))
+               ;; FIXME: Prevent infinite loop.
+               do (setf color-hex (if darker-than-background-p
+                                      (color-lighten-name color-hex 5)
+                                    (color-darken-name color-hex 5))))
+      color-hex)))
 
 ;;;;; Widgets
 
