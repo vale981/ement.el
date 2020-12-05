@@ -42,6 +42,12 @@
 (require 'ement-macros)
 (require 'ement-structs)
 
+;;;; Structs
+
+(cl-defstruct ement-room-membership
+  ;; Used to group together membership events.
+  events users)
+
 ;;;; Variables
 
 (defvar-local ement-ewoc nil
@@ -386,6 +392,42 @@ the buffer."
                             (`(ts) t)))))
           (ewoc-enter-after ewoc node-a
                             (list 'ts b-ts)))))))
+
+(cl-defun ement-room--insert-event-merged (ewoc event &key place<
+                                                merge-fn merge-before-pred merge-after-pred)
+  "Insert EVENT into EWOC at place where PLACE< returns non-nil.
+Should be called in EWOC's buffer.  PLACE< defaults to a
+function which compares `ement-event-origin-server-ts'.
+
+At the place, MERGE-BEFORE-PRED and MERGE-AFTER-PRED are tested
+on the events before and after the place, respectively.  If one
+of them returns non-nil, EVENT is merged with the matching event
+using MERGE-FN: it is called with EVENT as the first argument and
+the matched event as the second, and it should return the merged
+event; then the merged event replaces the matching event and is
+invalidated."
+  (let* ((place< (or place<
+                     (lambda (a b)
+                       "Return non-nil if event A's timestamp is before B's."
+                       (< (ement-event-origin-server-ts a)
+                          (ement-event-origin-server-ts b)))))
+         (node-before (or (ement-room--ewoc-node-before ewoc event place< :pred #'ement-event-p)
+                          (ewoc-nth ewoc 0)))
+         (enter-fn (if node-before #'ewoc-enter-after #'ewoc-enter-first)))
+    (cond ((and merge-before-pred node-before
+                (funcall merge-before-pred event (ewoc-data node-before)))
+           ;; TODO: Merge before.
+           )
+          ((when (and merge-after-pred node-before)
+             (when-let* ((node-after (ewoc-next node-before))
+                         (merge-after-p (funcall merge-after-pred event (ewoc-data node-after))))
+               ;; TODO: Merge after.
+               )))
+          (t  ;; TODO: Insert after.
+           ))
+
+
+    ))
 
 (defun ement-room--insert-event (event)
   "Insert EVENT into current buffer."
