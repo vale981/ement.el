@@ -43,6 +43,9 @@
 (cl-defstruct ement-event
   id sender content origin-server-ts type unsigned)
 
+(cl-defstruct ement-coalesced
+  events ts)
+
 (cl-defstruct ement-server
   hostname port)
 

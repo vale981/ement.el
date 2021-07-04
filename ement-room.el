@@ -39,6 +39,8 @@
 (require 'shr)
 (require 'subr-x)
 
+(require 'wid-edit)
+
 (require 'ement-api)
 (require 'ement-macros)
 (require 'ement-structs)
@@ -442,63 +444,76 @@ the buffer."
   (let* ((ewoc ement-ewoc)
          (event< (lambda (a b)
                    "Return non-nil if event A's timestamp is before B's."
-                   (< (ement-event-origin-server-ts a)
-                      (ement-event-origin-server-ts b))))
-         (node-before (ement-room--ewoc-node-before ewoc event event< :pred #'ement-event-p))
+                   (cl-labels ((it-ts
+                                ;; Okay, this is where using EIEIO instead of structs might be helpful...
+                                (it)
+                                (cl-typecase it
+                                  (ement-event (ement-event-origin-server-ts it))
+                                  (ement-coalesced (ement-coalesced-ts it)))))
+                     (< (it-ts a) (it-ts b)))))
+         (node-before (ement-room--ewoc-node-before ewoc event event< :pred (lambda (node)
+                                                                              (or (ement-event-p node)
+                                                                                  (ement-coalesced-p node)))))
          new-node)
-    (setf new-node (if (not node-before)
-                       (progn
-                         (ement-debug "No event before it: add first.")
-                         (if-let ((first-node (ewoc-nth ewoc 0)))
-                             (progn
-                               (ement-debug "EWOC not empty.")
-                               (if (and (ement-user-p (ewoc-data first-node))
-                                        (equal (ement-event-sender event)
-                                               (ewoc-data first-node)))
-                                   (progn
-                                     (ement-debug "First node is header for this sender: insert after it, instead.")
-                                     (setf node-before first-node)
-                                     (ewoc-enter-after ewoc first-node event))
-                                 (ement-debug "First node is not header for this sender: insert first.")
-                                 (ewoc-enter-first ewoc event)))
-                           (ement-debug "EWOC empty: add first.")
-                           (ewoc-enter-first ewoc event)))
-                     (ement-debug "Found event before new event: insert after it.")
-                     (when-let ((next-node (ewoc-next ewoc node-before)))
-                       (when (and (ement-user-p (ewoc-data next-node))
-                                  (equal (ement-event-sender event)
-                                         (ewoc-data next-node)))
-                         (ement-debug "Next node is header for this sender: insert after it, instead.")
-                         (setf node-before next-node)))
-                     (ewoc-enter-after ewoc node-before event)))
-    ;; Insert sender where necessary.
-    (if (not node-before)
-        (progn
-          (ement-debug "No event before: Add sender before new node.")
-          (ewoc-enter-before ewoc new-node (ement-event-sender event)))
-      (ement-debug "Event before: compare sender.")
-      (if (equal (ement-event-sender event)
-                 (pcase-exhaustive (ewoc-data node-before)
-                   ((pred ement-event-p)
-                    (ement-event-sender (ewoc-data node-before)))
-                   ((pred ement-user-p)
-                    (ewoc-data node-before))
-                   (`(ts ,(pred numberp))
-                    ;; Timestamp header.
-                    (when-let ((node-before-ts (ewoc-prev ewoc node-before)))
-                      ;; FIXME: Well this is ugly.  Make a filter predicate or something.
-                      (pcase-exhaustive (ewoc-data node-before-ts)
-                        ((pred ement-event-p)
-                         (ement-event-sender (ewoc-data node-before)))
-                        ((pred ement-user-p)
-                         (ewoc-data node-before)))))))
-          (ement-debug "Same sender.")
-        (ement-debug "Different sender: insert new sender node.")
-        (ewoc-enter-before ewoc new-node (ement-event-sender event))
-        (when-let* ((next-node (ewoc-next ewoc new-node)))
-          (when (ement-event-p (ewoc-data next-node))
-            (ement-debug "Event after from different sender: insert its sender before it.")
-            (ewoc-enter-before ewoc next-node (ement-event-sender (ewoc-data next-node)))))))))
+    (pcase (ement-event-type event)
+      ("m.room.member" (ement-room--insert-coalesced
+                        event (lambda (node)
+                                (and (ement-coalesced-p node)
+                                     (equal "m.room.member" (ement-event-type (car (ement-coalesced-events node))))))))
+      (_
+       (setf new-node (if (not node-before)
+                          (progn
+                            (ement-debug "No event before it: add first.")
+                            (if-let ((first-node (ewoc-nth ewoc 0)))
+                                (progn
+                                  (ement-debug "EWOC not empty.")
+                                  (if (and (ement-user-p (ewoc-data first-node))
+                                           (equal (ement-event-sender event)
+                                                  (ewoc-data first-node)))
+                                      (progn
+                                        (ement-debug "First node is header for this sender: insert after it, instead.")
+                                        (setf node-before first-node)
+                                        (ewoc-enter-after ewoc first-node event))
+                                    (ement-debug "First node is not header for this sender: insert first.")
+                                    (ewoc-enter-first ewoc event)))
+                              (ement-debug "EWOC empty: add first.")
+                              (ewoc-enter-first ewoc event)))
+                        (ement-debug "Found event before new event: insert after it.")
+                        (when-let ((next-node (ewoc-next ewoc node-before)))
+                          (when (and (ement-user-p (ewoc-data next-node))
+                                     (equal (ement-event-sender event)
+                                            (ewoc-data next-node)))
+                            (ement-debug "Next node is header for this sender: insert after it, instead.")
+                            (setf node-before next-node)))
+                        (ewoc-enter-after ewoc node-before event)))
+       ;; Insert sender where necessary.
+       (if (not node-before)
+           (progn
+             (ement-debug "No event before: Add sender before new node.")
+             (ewoc-enter-before ewoc new-node (ement-event-sender event)))
+         (ement-debug "Event before: compare sender.")
+         (if (equal (ement-event-sender event)
+                    (pcase-exhaustive (ewoc-data node-before)
+                      ((pred ement-event-p)
+                       (ement-event-sender (ewoc-data node-before)))
+                      ((pred ement-user-p)
+                       (ewoc-data node-before))
+                      (`(ts ,(pred numberp))
+                       ;; Timestamp header.
+                       (when-let ((node-before-ts (ewoc-prev ewoc node-before)))
+                         ;; FIXME: Well this is ugly.  Make a filter predicate or something.
+                         (pcase-exhaustive (ewoc-data node-before-ts)
+                           ((pred ement-event-p)
+                            (ement-event-sender (ewoc-data node-before)))
+                           ((pred ement-user-p)
+                            (ewoc-data node-before)))))))
+             (ement-debug "Same sender.")
+           (ement-debug "Different sender: insert new sender node.")
+           (ewoc-enter-before ewoc new-node (ement-event-sender event))
+           (when-let* ((next-node (ewoc-next ewoc new-node)))
+             (when (ement-event-p (ewoc-data next-node))
+               (ement-debug "Event after from different sender: insert its sender before it.")
+               (ewoc-enter-before ewoc next-node (ement-event-sender (ewoc-data next-node)))))))))))
 
 (cl-defun ement-room--ewoc-node-before (ewoc data <-fn
                                              &key (from 'last) (pred #'identity))
@@ -544,6 +559,10 @@ seconds."
   (pcase-exhaustive thing
     ((pred ement-event-p)
      (insert "" (ement-room--format-event thing)))
+    ((pred ement-coalesced-p)
+     (widget-create 'ement-room-membership
+                    :button-face 'ement-room-membership
+                    :value thing))
     ((pred ement-user-p)
      (insert (propertize (ement-room--format-user thing)
                          'display ement-room-username-display-property)))
@@ -607,6 +626,41 @@ seconds."
                            'help-echo (format "%S" event))))
           (propertize " "
                       'display ement-room-event-separator-display-property)))
+
+(defun ement-room--insert-coalesced (event pred)
+  "FIXME: Docstring."
+  ;; Find widget type before or after point.
+  (cl-labels ((matching-node
+               (node) (when (and ;; (let ((print-level 1))
+                             ;;   (ement-debug "Comparing node" node (when node
+                             ;;                                        (ewoc-data node)))
+                             ;;   t)
+                             node
+                             (progn (ement-debug "Node exists") t)
+                             (ewoc-data node)
+                             (progn (ement-debug "Node has data" (ewoc-data node)) t)
+                             (funcall pred (ewoc-data node)))
+                        node)))
+    (let* ((ewoc ement-ewoc)
+           (point-node (ewoc-locate ewoc))
+           (node-before (ewoc-prev ewoc point-node))
+           (node-after (ewoc-next ewoc point-node))
+           (found-node (or (matching-node node-before)
+                           (matching-node node-after)))
+           new-struct)
+      (if found-node
+          (progn
+            (ement-debug "Found node")
+            (push event (ement-coalesced-events (ewoc-data found-node)))
+            ;;  (ewoc-set-data found-node (cons event (ewoc-data found-node)))
+            (ewoc-invalidate ewoc found-node))
+        (ement-debug "Inserting new node")
+        (setf new-struct (make-ement-coalesced :events (list event)
+                                               ;; FIXME: Update ts when coalescing?
+                                               :ts (ement-event-origin-server-ts event)))
+        (if point-node
+            (ewoc-enter-after ewoc point-node new-struct)
+          (ewoc-enter-first ewoc new-struct))))))
 
 (cl-defun ement-room--format-message (event &optional (format ement-room-message-format-spec))
   "Return EVENT formatted according to FORMAT.
@@ -805,15 +859,28 @@ For use as a `help-echo' function on `ement-user' headings."
 
 (require 'widget)
 
-(defun ement-room--membership-help-echo (window _object pos)
-  "Return membership event string for POS in WINDOW.
-For use as a `help-echo' function on `ement-user' headings."
-  (with-selected-window window
-    (format "%S" (ement-event-content (ewoc-data (ewoc-locate ement-ewoc pos))))))
+;; (defun ement-room--membership-help-echo (window _object pos)
+;;   "Return membership event string for POS in WINDOW.
+;; For use as a `help-echo' function on `ement-user' headings."
+;;   (with-selected-window window
+;;     (format "%S" (ement-event-content (ewoc-data (ewoc-locate ement-ewoc pos))))))
 
 ;; (defun ement-room--membership-help-echo (widget)
 ;;   "Return membership event string for WIDGET."
 ;;   (format "%S" (ement-event-content (widget-value widget))))
+
+;; (define-widget 'ement-room-membership 'item
+;;   "Widget for membership events."
+;;   :format "%{ %v %}"
+;;   :sample-face 'ement-room-membership
+;;   ;; FIXME: Using the :help-echo property on the widget doesn't seem to work, seemingly something to do with the widget
+;;   ;; hierarchy (using `widget-forward' says "No buttons or fields found"), so we use 'help-echo on the string for now.
+;;   ;;  :help-echo #'ement-room--membership-help-echo
+;;   :value-create (lambda (widget)
+;;                   (insert (propertize (alist-get 'membership (ement-event-content (widget-value widget)))
+;;                                       'help-echo #'ement-room--membership-help-echo))))
+
+;; TODO: Implement sender-grouping using this coalescing.
 
 (define-widget 'ement-room-membership 'item
   "Widget for membership events."
@@ -823,8 +890,23 @@ For use as a `help-echo' function on `ement-user' headings."
   ;; hierarchy (using `widget-forward' says "No buttons or fields found"), so we use 'help-echo on the string for now.
   ;;  :help-echo #'ement-room--membership-help-echo
   :value-create (lambda (widget)
-                  (insert (propertize (alist-get 'membership (ement-event-content (widget-value widget)))
-                                      'help-echo #'ement-room--membership-help-echo))))
+                  (let* ((string (format "%s membership events" (length (ement-coalesced-events (widget-value widget)))))
+                         ;; FIXME: Probably inefficient to make a lambda every time, but it is convenient.
+                         (help-echo (lambda (_window _object _pos)
+                                      (let* ((changes
+                                              (cl-loop with types
+                                                       for event in (ement-coalesced-events (widget-value widget))
+                                                       for user = (ement-user-id (ement-event-sender event))
+                                                       for membership = (alist-get 'membership (ement-event-content event))
+                                                       do (cl-pushnew user (alist-get membership types nil nil #'equal))
+                                                       finally return types)))
+                                        (string-join (cl-loop for (type . users) in changes
+                                                              collect (format "%s:%s"
+                                                                              (upcase type)
+                                                                              (string-join users ",")))
+                                                     "\n")))))
+                    (insert (propertize string
+                                        'help-echo help-echo)))))
 
 ;;;; Footer
 
