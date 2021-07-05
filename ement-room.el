@@ -450,16 +450,19 @@ the buffer."
                                 (cl-typecase it
                                   (ement-event (ement-event-origin-server-ts it))
                                   (ement-coalesced (ement-coalesced-ts it)))))
+                     (ement-debug "event<:"  "Comparing timestamps:" (list 'A (aref a 0) (it-ts a)) (list 'B (aref b 0) (it-ts b)))
                      (< (it-ts a) (it-ts b)))))
          (node-before (ement-room--ewoc-node-before ewoc event event< :pred (lambda (node)
                                                                               (or (ement-event-p node)
                                                                                   (ement-coalesced-p node)))))
          new-node)
     (pcase (ement-event-type event)
-      ("m.room.member" (ement-room--insert-coalesced
-                        event (lambda (node)
-                                (and (ement-coalesced-p node)
-                                     (equal "m.room.member" (ement-event-type (car (ement-coalesced-events node))))))))
+      ("m.room.member"
+       (ement-room--insert-coalesced
+        ewoc node-before event
+        (lambda (node)
+          (and (ement-coalesced-p (ewoc-data node))
+               (equal "m.room.member" (ement-event-type (car (ement-coalesced-events (ewoc-data node)))))))))
       (_
        (setf new-node (if (not node-before)
                           (progn
@@ -487,6 +490,7 @@ the buffer."
                             (setf node-before next-node)))
                         (ewoc-enter-after ewoc node-before event)))
        ;; Insert sender where necessary.
+       ;; FIXME: Use event coalescing for this.
        (if (not node-before)
            (progn
              (ement-debug "No event before: Add sender before new node.")
@@ -524,6 +528,10 @@ the buffer."
     (ement-debug "EWOC has data: add at appropriate place.")
     (cl-labels ((next-matching
                  (ewoc node next-fn pred) (cl-loop do (setf node (funcall next-fn ewoc node))
+                                                   (let ((print-level 1)
+                                                         (print-length 5))
+                                                     (ement-debug "Next node:" (when node
+                                                                                 (ewoc-data node))))
                                                    until (or (null node)
                                                              (funcall pred (ewoc-data node)))
                                                    finally return node)))
@@ -627,39 +635,37 @@ seconds."
           (propertize " "
                       'display ement-room-event-separator-display-property)))
 
-(defun ement-room--insert-coalesced (event pred)
+(defun ement-room--insert-coalesced (ewoc node-before event pred)
   "FIXME: Docstring."
   ;; Find widget type before or after point.
   (cl-labels ((matching-node
-               (node) (when (and ;; (let ((print-level 1))
-                             ;;   (ement-debug "Comparing node" node (when node
-                             ;;                                        (ewoc-data node)))
-                             ;;   t)
-                             node
-                             (progn (ement-debug "Node exists") t)
-                             (ewoc-data node)
-                             (progn (ement-debug "Node has data" (ewoc-data node)) t)
-                             (funcall pred (ewoc-data node)))
+               (node) (when (and node (funcall pred node))
                         node)))
-    (let* ((ewoc ement-ewoc)
-           (point-node (ewoc-locate ewoc))
-           (node-before (ewoc-prev ewoc point-node))
-           (node-after (ewoc-next ewoc point-node))
+    (let* ((node-after (ewoc-next ewoc node-before))
            (found-node (or (matching-node node-before)
-                           (matching-node node-after)))
+                           (matching-node node-after)
+                           (matching-node (ewoc-prev ewoc node-before))))
            new-struct)
       (if found-node
           (progn
             (ement-debug "Found node")
             (push event (ement-coalesced-events (ewoc-data found-node)))
-            ;;  (ewoc-set-data found-node (cons event (ewoc-data found-node)))
             (ewoc-invalidate ewoc found-node))
         (ement-debug "Inserting new node")
         (setf new-struct (make-ement-coalesced :events (list event)
                                                ;; FIXME: Update ts when coalescing?
                                                :ts (ement-event-origin-server-ts event)))
-        (if point-node
-            (ewoc-enter-after ewoc point-node new-struct)
+        (if node-before
+            (progn
+              (ement-debug "Node found before" (type-of (ewoc-data node-before)))
+              (cl-typecase (ewoc-data node-before)
+                (ement-event-sender
+                 ;; Don't put under a sender name: enter before it.
+                 (ement-debug "Moving above sender")
+                 (ewoc-enter-before ewoc node-before new-struct))
+                (otherwise (ement-debug "Inserting after")
+                           (ewoc-enter-after ewoc node-before new-struct))))
+          (ement-debug "No node before: entering first")
           (ewoc-enter-first ewoc new-struct))))))
 
 (cl-defun ement-room--format-message (event &optional (format ement-room-message-format-spec))
