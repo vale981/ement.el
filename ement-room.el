@@ -318,6 +318,7 @@ the previously oldest event."
     (when buffer
       (with-current-buffer buffer
         (ement-room--insert-events chunk 'retro)
+        (ement-room--process-events chunk)
         (setf (ement-room-prev-batch room) end
               ement-room-retro-loading nil)))))
 
@@ -466,6 +467,7 @@ data slot."
           ;; calls to `ement-room--insert-ts-headers'.
           ;; FIXME: Unify these event-insertion calls.
           (mapc #'ement-room--insert-event (ement-room-timeline room))
+          ;; FIXME: This duplicates reactions every time a room's buffer is recreated.
           (ement-room--process-events (ement-room-timeline room))
           (ement-room--insert-ts-headers)
           ;; Track buffer in room's slot.
@@ -575,7 +577,7 @@ function to `ement-room-event-fns', which see."
   "Process EVENTS in current buffer.
 Uses handlers defined in `ement-room-event-fns'.  The current
 buffer should be a room's buffer."
-  (cl-loop for event in events
+  (cl-loop for event being the elements of events  ;; EVENTS may be a list or array.
            for handler = (alist-get (ement-event-type event) ement-room-event-fns nil nil #'string=)
            when handler
            do (funcall handler event)))
