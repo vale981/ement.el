@@ -193,7 +193,14 @@ See Info node `(elisp)Specified Space'."
 
 (defface ement-room-reactions
   '((t (:inherit font-lock-comment-face :height 0.9)))
-  "Reactions to messages.")
+  "Reactions to messages (including the user count).")
+
+(defface ement-room-reactions-key
+  '((t (:inherit ement-room-reactions :height 1.5)))
+  "Reactions to messages (the key, i.e. the emoji part).
+Uses a separate face to allow the key to be shown at a different
+size, because in some fonts, emojis are too small relative to
+normal text.")
 
 (defface ement-room-timestamp
   '((t (:inherit font-lock-comment-face)))
@@ -821,20 +828,31 @@ seconds."
           (propertize " "
                       'display ement-room-event-separator-display-property)))
 
+
+
 (defun ement-room--format-reactions (event)
   "Return formatted reactions to EVENT."
+  ;; TODO: Like other events, pop to a buffer showing the raw reaction events when a key is pressed.
   (if-let ((reactions (map-elt (ement-event-local event) 'reactions)))
-      (cl-labels ((format-key-senders
-                   (ks) (pcase-let ((`(,key . ,senders) ks))
-                          (propertize (format "%s (%s)" key (length senders))
-                                      'help-echo (string-join senders ", ")))))
+      (cl-labels ((format-reaction
+                   (ks) (pcase-let* ((`(,key . ,senders) ks)
+                                     (key (propertize key 'face 'ement-room-reactions-key))
+                                     (count (propertize (format "(%s)" (length senders))
+                                                        'face 'ement-room-reactions)))
+                          (propertize (concat key " " count)
+                                      'help-echo (lambda (_window buffer _pos)
+                                                   (senders-names senders (buffer-local-value 'ement-room buffer))))))
+                  (senders-names
+                   (senders room) (cl-loop for sender in senders
+                                           collect (ement-room--user-display-name sender room)
+                                           into names
+                                           finally return (string-join names ", "))))
         (cl-loop with keys-senders
                  for reaction in reactions
                  for key = (map-nested-elt (ement-event-content reaction) '(m.relates_to key))
-                 for sender-name = (ement-room--user-display-name (ement-event-sender reaction) ement-room)
-                 do (push sender-name (alist-get key keys-senders nil nil #'string=))
-                 finally return (propertize (concat "\n  " (string-join (mapcar #'format-key-senders keys-senders) "  "))
-                                            'face 'ement-room-reactions)))
+                 for sender = (ement-event-sender reaction)
+                 do (push sender (alist-get key keys-senders nil nil #'string=))
+                 finally return (concat "\n  " (string-join (mapcar #'format-reaction keys-senders) "  "))))
     ""))
 
 (cl-defun ement-room--format-message (event &optional (format ement-room-message-format-spec))
