@@ -547,7 +547,9 @@ function to `ement-room-event-fns', which see."
                                         return event)))
            ;; Found related event: add reaction to local slot and invalidate node.
            (progn
-             (push event (map-elt (ement-event-local related-event) 'reactions))
+             ;; Every time a room buffer is made, these reaction events are processed again, so we use pushnew to
+             ;; avoid duplicates.  (In the future, as event-processing is refactored, this may not be necessary.)
+             (cl-pushnew event (map-elt (ement-event-local related-event) 'reactions))
              (ewoc-invalidate ement-ewoc (ement-room--ewoc-last-matching
                                           (lambda (data)
                                             (and (ement-event-p data)
