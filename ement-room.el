@@ -456,14 +456,18 @@ data slot."
           (visual-line-mode 1)
           (setf ement-session session
                 ement-room room)
+          ;; FIXME: Some code is duplicated here and in `ement--update-room-buffers'.
+          ;; Move new events to the main timeline slot first, because some events can
+          ;; refer to other events, and we want them to be found in the timeline slot.
+          (setf (ement-room-timeline ement-room) (append (ement-room-timeline* ement-room)
+                                                         (ement-room-timeline ement-room))
+                (ement-room-timeline* room) nil)
           ;; We don't use `ement-room--insert-events' to avoid extra
           ;; calls to `ement-room--insert-ts-headers'.
+          ;; FIXME: Unify these event-insertion calls.
           (mapc #'ement-room--insert-event (ement-room-timeline room))
-          (mapc #'ement-room--insert-event (ement-room-timeline* room))
+          (ement-room--process-events (ement-room-timeline room))
           (ement-room--insert-ts-headers)
-          ;; Move new events to main list.
-          (setf (ement-room-timeline room) (append (ement-room-timeline* room) (ement-room-timeline room))
-                (ement-room-timeline* room) nil)
           ;; Track buffer in room's slot.
           (setf (map-elt (ement-room-local ement-room) 'buffer) (current-buffer))
           (add-hook 'kill-buffer-hook
