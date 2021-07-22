@@ -544,7 +544,7 @@ function to `ement-room-event-fns', which see."
   (declare (indent defun))
   `(setf (alist-get ,type ement-room-event-fns nil nil #'string=)
          (lambda (event)
-           ;; TODO: Docstring.
+           ,(concat "`ement-room' handler function for " type " events.")
            ,@body)))
 
 (ement-room-defevent "m.reaction"
