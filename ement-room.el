@@ -291,7 +291,13 @@ the previously oldest event."
             point-node (with-selected-window window
                          (ewoc-locate ement-ewoc (window-start)))
             orig-first-node (ewoc-nth ement-ewoc 0)))
-    (mapc #'ement-room--insert-event events)
+    ;; HACK: Only insert certain types of events.
+    ;; TODO: This should be done in a unified interface.
+    (cl-loop for event being the elements of events
+             when (pcase (ement-event-type event)
+                    ("m.reaction" nil)
+                    (_ t))
+             do (ement-room--insert-event event))
     ;; Since events can be received in any order, we have to check the whole buffer
     ;; for where to insert new timestamp headers.  (Avoiding that would require
     ;; getting a list of newly inserted nodes and checking each one instead of every
