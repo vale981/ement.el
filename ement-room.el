@@ -71,6 +71,10 @@ Used by `ement-room-send-message'.")
   "Hook run in compose buffers when created.
 Used to, e.g. call `ement-room-compose-org'.")
 
+(defvar ement-room-in-retro-callback nil
+  ;; TODO: Use this in more event handlers.
+  "Non-nil when `ement-room-retro-callback' is running.")
+
 (declare-function ement-view-room "ement.el")
 (declare-function ement-room-list "ement-room-list.el")
 (declare-function ement-notify-switch-to-mentions-buffer "ement-notify")
@@ -1107,7 +1111,8 @@ reaction string, e.g. \"👍\"."
 (declare-function ement--make-event "ement.el")
 (defun ement-room-retro-callback (room data)
   "Push new DATA to ROOM on SESSION and add events to room buffer."
-  (pcase-let* (((cl-struct ement-room local) room)
+  (pcase-let* ((ement-room-in-retro-callback t)
+               ((cl-struct ement-room local) room)
 	       ((map _start end chunk state) data)
                ((map buffer) local)
                (num-events (length chunk))
@@ -1150,6 +1155,7 @@ reaction string, e.g. \"👍\"."
             (when-let ((buffer-window (get-buffer-window buffer)))
               (select-window buffer-window))
             ;; FIXME: Use retro-loading in event handlers, or in --handle-events, anyway.
+            (ement-room--handle-events state)
             (ement-room--handle-events chunk)
             (setf (ement-room-prev-batch room) end
                   ement-room-retro-loading nil)))))
@@ -1395,17 +1401,28 @@ data slot."
                               (equal "join" (alist-get 'membership (ement-event-content event)))
                               (equal user (ement-event-sender event))
                               (alist-get 'displayname (ement-event-content event)))))
-      (if-let* ((displayname (or (cl-loop for event in (ement-room-timeline room)
-                                          when (join-displayname-event-p event)
-                                          return (alist-get 'displayname (ement-event-content event)))
-                                 (cl-loop for event in (ement-room-state room)
-                                          when (join-displayname-event-p event)
-                                          return (alist-get 'displayname (ement-event-content event)))))
-                (calculated-name displayname))
-          (puthash room calculated-name (ement-user-room-display-names user))
-        ;; No membership state event: use pre-calculated displayname or ID.
-        (or (ement-user-displayname user)
-            (ement-user-id user))))))
+      ;; FIXME: As the number of events in a room increases, so does the time it takes
+      ;; to search them here.  In case a room has many events (like over a thousand),
+      ;; it can get slow when loading earlier events.  Not sure how to fix this.
+      (let* ((name-event (or (cl-loop for event in (ement-room-timeline room)
+                                      when (join-displayname-event-p event)
+                                      return event)
+                             (cl-loop for event in (ement-room-state room)
+                                      when (join-displayname-event-p event)
+                                      return event)))
+             (name-from-event (when name-event
+                                (alist-get 'displayname (ement-event-content name-event))))
+             (calculated-name (or name-from-event
+                                  ;; No membership state event: use pre-calculated displayname or ID.
+                                  (ement-user-displayname user)
+                                  (ement-user-id user))))
+        (when name-event
+          ;; We also have to save the latest displayname event so we know whether a newly received displayname
+          ;; event is actually newer, so we know whether to recalculate the cached name in the future.
+          (setf (ement-user-displayname-event user) name-event))
+        ;; NOTE: When a user changes display name, the cached value in that room
+        ;; needs to be cleared so this function will calculate a new value.
+        (puthash room calculated-name (ement-user-room-display-names user))))))
 
 (defun ement-room--event-data (id)
   "Return event struct for event ID in current buffer."
@@ -1532,6 +1549,12 @@ function to `ement-room-event-fns', which see."
       (ewoc-set-hf ement-ewoc "" footer))))
 
 (ement-room-defevent "m.room.member"
+  (when (alist-get 'displayname (ement-event-content event))
+    (unless (ement-user-displayname-event (ement-event-sender event))
+      ;; User had no previously seen displayname event: clear cached
+      ;; displayname to cause it to be recalculated.
+      ;; FIXME: Pass room and session to function instead of getting from room buffer.
+      (puthash ement-room nil (ement-user-room-display-names (ement-event-sender event)))))
   (with-silent-modifications
     (ement-room--insert-event event)))
 
