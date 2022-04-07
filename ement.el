@@ -572,6 +572,8 @@ suggested room."
                (name-to-room-session
                 (cl-loop for session in sessions
                          append (cl-loop for room in (ement-session-rooms session)
+                                         when (or (not predicate)
+                                                  (funcall predicate room))
                                          collect (cons (ement--format-room room)
                                                        (list room session)))))
                (names (mapcar #'car name-to-room-session))
@@ -1383,6 +1385,83 @@ To be called after initial sync."
           (dolist (child-id children)
             (when-let ((child-room (cl-find child-id rooms :key #'ement-room-id :test #'equal)))
               (cl-pushnew parent-id (alist-get 'parents (ement-room-local child-room)) :test #'equal))))))))
+
+(cl-defun ement-put-state (room type key data session
+                                &key (then (lambda (response-data)
+                                             (ement-debug "State data put on room" response-data data room session))))
+  "Put state event of TYPE with KEY and DATA on ROOM on SESSION.
+DATA should be an alist, which will become the JSON request
+body."
+  (declare (indent defun))
+  (pcase-let* ((endpoint (format "rooms/%s/state/%s/%s"
+                                 (url-hexify-string (ement-room-id room))
+                                 type key)))
+    (ement-api session endpoint :method 'put :data (json-encode data)
+      ;; TODO: Handle error codes.
+      :then then)))
+
+(defun ement-space-room (room space session &optional remove)
+  ;; Naming things is hard, but this seems the best balance between concision, ambiguity,
+  ;; and consistency.  The docstring is always there.  (Or there's the sci-fi angle:
+  ;; "spacing" a room...)
+  "Add ROOM to SPACE on SESSION.
+If REMOVE (interactively, with prefix), remove the room from the
+space."
+  (interactive
+   (pcase-let* ((`(,room ,session) (ement-complete-room))
+                (`(,space ,_session) (ement-complete-room :session session :prompt "Add to space: " :suggest nil
+                                       :predicate (lambda (room)
+                                                    (equal "m.space" (ement-room-type room))))))
+     (list room space session current-prefix-arg)))
+  (pcase-let* (((cl-struct ement-room) space)
+               ((cl-struct ement-room (id child-id)) room)
+               (routing-server (progn
+                                 (string-match (rx (1+ (not (any ":"))) ":" (group (1+ anything))) child-id)
+                                 (match-string 1 child-id)))
+               (data (unless remove
+                       (ement-alist "via" (vector
+                                           ;; FIXME: Finish and use the routing function.
+                                           ;; (ement--room-routing room)
+                                           routing-server)))))
+    (ement-put-state space "m.space.child" child-id data session
+      :then (lambda (response-data)
+              ;; It appears that the server doesn't send the new event in the next sync
+              ;; (at least, not to the client that put the state), so we must simulate
+              ;; receiving it.
+              (pcase-let* (((map event_id) response-data)
+                           ((cl-struct ement-session user) session)
+                           ((cl-struct ement-room (id child-id)) room)
+                           (fake-event (make-ement-event :id event_id :type "m.space.child"
+                                                         :sender user :state-key child-id
+                                                         :content (json-read-from-string (json-encode data)))))
+                (push fake-event (ement-room-timeline space))
+                (run-hook-with-args 'ement-event-hook fake-event space session))))))
+
+(defun ement--room-routing (room)
+  "Return a list of servers to route to ROOM through."
+  ;; See <https://spec.matrix.org/v1.2/appendices/#routing>.
+  ;; FIXME: Ensure highest power level user is at least level 50.
+  ;; FIXME: Ignore servers blocked due to server ACLs.
+  ;; FIXME: Ignore servers which are IP addresses.
+  (cl-labels ((most-powerful-user-in
+               (room))
+              (servers-by-population-in
+               (room)))
+    (let (first-server-by-power-level)
+      (delete-dups
+       (remq nil
+             (list
+              ;; 1.
+              (or (when-let ((user (most-powerful-user-in room)))
+                    (setf first-server-by-power-level t)
+                    (server-of user))
+                  (car (servers-by-population-in room)))
+              ;; 2.
+              (if first-server-by-power-level
+                  (car (servers-by-population-in room))
+                (cl-second (servers-by-population-in room)))
+              ;; 3.
+              (cl-third (servers-by-population-in room))))))))
 
 ;;;; Footer
 
