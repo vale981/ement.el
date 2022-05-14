@@ -807,13 +807,33 @@ BODY is wrapped in a lambda form that binds `event', `room', and
     ;; So `ement-room--format-user' returns a string propertized with `help-echo' as a string.
     (concat sender "​")))
 
+(ement-room-define-event-formatter ?S
+  "Sender display name."
+  (ignore session)
+  (pcase-let ((sender (ement-room--format-user (ement-event-sender event) room)))
+    sender))
+
+(defcustom ement-room-generate-user-avatars t
+  "Generate Element-like avatars for users who have none."
+  :type 'boolean)
+
 (ement-room-define-event-formatter ?a
   "Sender avatar."
-  (ignore session)
-  (if-let (avatar (ement-user-avatar (ement-event-sender event)))
-      ;; (propertize " " 'display `((:align-to left-margin) ,avatar))
-      (propertize " " 'display avatar)
-    "NOA"))
+  (ignore session room)
+  (pcase-let (((cl-struct ement-event sender) event))
+    (if-let (avatar (ement-user-avatar sender))
+        ;; (propertize " " 'display `((:align-to left-margin) ,avatar))
+        (propertize " " 'display avatar)
+      (if ement-room-generate-user-avatars
+          (propertize " "
+                      'display (setf (ement-user-avatar sender)
+                                     (ement--make-avatar (ement--user-displayname-in room sender)
+                                                         (or (ement-user-color sender)
+                                                             (setf (ement-user-color sender)
+                                                                   (ement-room--user-color sender))))))
+        ;; User avatars seem to be about 2 characters wide on average, so if the user has
+        ;; none, use two spaces.
+        " "))))
 
 (ement-room-define-event-formatter ?r
   "Reactions."
@@ -2278,26 +2298,39 @@ function to `ement-room-event-fns', which see."
   (ement-room--insert-event event))
 
 (ement-room-defevent "m.room.member"
-  (pcase-let* (((cl-struct ement-event sender) event)
-               ((cl-struct ement-user avatar-url) sender)
+  (pcase-let* (((cl-struct ement-event sender
+                           (content (map ('avatar_url avatar-url))))
+                event)
                (room ement-room))
     (with-silent-modifications
       (ement-room--insert-event event))
-    (when (and ement-room-user-avatars avatar-url (not (string-empty-p avatar-url)))
-      (plz 'get (ement--mxc-to-url avatar-url ement-session) :as 'binary
-        :then (lambda (data)
-                (let* ((image (ement--resize-image (create-image data nil 'data-p)
-                                                   nil (frame-char-height))))
-                  (setf (image-property image :ascent) 'center
-                        (ement-user-avatar sender) image)
-                  (message "SENDER:%S  AVATAR:%S" (ement-user-id sender) image)
-                  (when-let (buffer (alist-get 'buffer (ement-room-local room)))
-                    (with-current-buffer buffer
-                      (ewoc-map
-                       (lambda (data)
-                         (and (ement-event-p data)
-                              (equal (ement-event-sender data) sender)))
-                       ement-ewoc)))))))))
+    (cond ((and ement-room-user-avatars avatar-url (not (string-empty-p avatar-url)))
+           (plz 'get (ement--mxc-to-url avatar-url ement-session) :as 'binary
+             :then (lambda (data)
+                     (when data
+                       (when-let (image (create-image data nil 'data-p))
+                         (setf image (ement--resize-image image nil (frame-char-height))
+                               (image-property image :ascent) 'center
+                               (ement-user-avatar sender) image) 
+                         (when-let (buffer (alist-get 'buffer (ement-room-local room)))
+                           (with-current-buffer buffer
+                             (ewoc-map
+                              (lambda (data)
+                                (and (ement-event-p data)
+                                     (equal (ement-event-sender data) sender)))
+                              ement-ewoc))))))))
+          (ement-room-generate-user-avatars
+           (setf (ement-user-avatar sender)
+                 (ement--make-avatar (ement--user-displayname-in room sender)
+                                     (or (ement-user-color sender)
+                                         (setf (ement-user-color sender)
+                                               (ement-room--user-color sender)))))))))
+
+(defun ement--make-avatar (string background)
+  (svg-lib-tag (substring string 0 1) nil
+               :background background
+               :foreground "white"
+               :stroke 0))
 
 (ement-room-defevent "m.room.message"
   (pcase-let* (((cl-struct ement-event content unsigned) event)
@@ -2872,8 +2905,13 @@ seconds."
     ((pred ement-event-p)
      (insert "" (ement-room--format-event thing ement-room ement-session)))
     ((pred ement-user-p)
-     (insert (propertize (ement-room--format-user thing)
-                         'display ement-room-username-display-property)))
+     (let ((string (ement-room--format-user thing)))
+       (alter-text-property 0 (length string) 'display
+                            (lambda (value)
+                              (list ement-room-username-display-property value))
+                            string)
+       (insert string
+               )))
     (`(ts ,(and (pred numberp) ts)) ;; Insert a date header.
      (insert
       (if (equal ement-room-timestamp-header-format ement-room-timestamp-header-with-date-format)
@@ -3056,12 +3094,26 @@ Format defaults to `ement-room-message-format-spec', which see."
         (when-let ((left-margin-end (next-single-property-change (point-min) 'left-margin-end)))
           (goto-char left-margin-end)
           (delete-char 1)
-          (let ((left-margin-text-width (string-width (buffer-substring-no-properties (point-min) (point)))))
+          (let ((left-margin-text-width (ement--string-width (buffer-substring (point-min) (point))))
+                (string (buffer-substring (point-min) (point))))
             ;; It would be preferable to not have to allocate a string to
             ;; calculate the display width, but I don't know of another way.
-            (put-text-property (point-min) (point)
-                               'display `((margin left-margin)
-                                          ,(buffer-substring (point-min) (point))))
+            ;; (put-text-property (point-min) (point)
+            ;;                    'display `((margin left-margin)
+            ;;                               ,(buffer-substring (point-min) (point))))
+            (alter-text-property (point-min) (point) 'display
+                                 ;; Make any images display in the left margin.
+                                 (lambda (value)
+                                   (when (or (eq 'image (car value))
+                                             (cl-find 'image value :key #'car))
+                                     `((margin left-margin) ,value))))
+            (alter-text-property (point-min) (point) 'display
+                                 ;; Make the rest of the text display in the left margin.
+                                 (lambda (value)
+                                   (if (or (eq 'image (car value))
+                                           (cl-find 'image value :key #'car))
+                                       value
+                                     `((margin left-margin) ,string))))
             (save-excursion
               (goto-char (point-min))
               ;; Insert a string with a display specification that causes it to be displayed in the
@@ -3085,6 +3137,26 @@ Format defaults to `ement-room-message-format-spec', which see."
              (propertize " "
                          'display `((margin right-margin) ,string))))))
       (buffer-string))))
+
+
+
+(defun ement--string-width (string)
+  "Return the display width in characters of STRING.
+Attempts to include the width of any images in it.  Assumes that
+any overriding `display' properties in STRING only override with
+images, not with other text."
+  (let* ((length (length string))
+         (pos -1)
+         (images-width 0))
+    (while (and (setf pos (text-property-not-all (1+ pos) length 'display nil string))
+                (< pos length))
+      (let* ((display (get-text-property pos 'display string))
+             (image (if (eq 'image (car display))
+                        display
+                      (cl-find 'image display :key #'car))))
+        (when image
+          (cl-incf images-width (floor (car (image-size image)))))))
+    (+ images-width (string-width string))))
 
 (cl-defun ement-room--format-message-body (event &key (formatted-p t))
   "Return formatted body of \"m.room.message\" EVENT.
@@ -3175,11 +3247,22 @@ ROOM defaults to the value of `ement-room'."
                      `(:inherit ement-room-user :foreground ,(or (ement-user-color user)
                                                                  (setf (ement-user-color user)
                                                                        (ement-room--user-color user)))))
-                    (t 'ement-room-user))))
+                    (t 'ement-room-user)))
+        (string (if (and ement-room-user-avatars ement-room-sender-in-headers)
+                    (concat (propertize " "
+                                        'display (list '(margin left-margin)
+                                                       (or (ement-user-avatar user)
+                                                           (setf (ement-user-avatar user)
+                                                                 (ement--make-avatar (ement--user-displayname-in room user)
+                                                                                     (or (ement-user-color user)
+                                                                                         (setf (ement-user-color user)
+                                                                                               (ement-room--user-color user))))))))
+                            "" (ement--user-displayname-in room user) )
+                  (ement--user-displayname-in room user))))
     ;; FIXME: If a membership state event has not yet been received, this
     ;; sets the display name in the room to the user ID, and that prevents
     ;; the display name from being used if the state event arrives later.
-    (propertize (ement--user-displayname-in room user)
+    (propertize string
                 'face face
                 'help-echo (ement-user-id user))))
 
