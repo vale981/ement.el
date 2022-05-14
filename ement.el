@@ -803,17 +803,38 @@ and `session' to the session.  Adds function to
                                          ('avatar_url avatar-url))))
                 event)
                (user (or (gethash state-key ement-users)
-                         (puthash state-key
-                                  (make-ement-user :id state-key :avatar-url avatar-url
-                                                   ;; NOTE: The spec doesn't seem to say whether the
-                                                   ;; displayname in the member event applies only to the
-                                                   ;; room or is for the user generally, so we'll save it
-                                                   ;; in the struct anyway.
-                                                   :displayname displayname)
+                         (puthash state-key (make-ement-user :id state-key)
                                   ement-users))))
+    (setf (ement-user-avatar-url user) avatar-url
+          ;; NOTE: The spec doesn't seem to say whether the
+          ;; displayname in the member event applies only to the
+          ;; room or is for the user generally, so we'll save it
+          ;; in the struct anyway.
+          (ement-user-displayname user) displayname)
+    ;; FIXME: Should we also update the room displayname here?  Shouldn't we only do that
+    ;; when we know it applies only to the room?
     (puthash room displayname (ement-user-room-display-names user))
-    (unless (gethash state-key members)
-      (puthash state-key user members))))
+    (puthash state-key user members)))
+
+;; (defvar ement-room-user-avatars)
+
+;; (defun ement--update-user-avatar (user room session)
+;;   "Update USER's avatar in ROOM on SESSION."
+;;   (ignore session)
+;;   (pcase-let (((cl-struct ement-user avatar-url) user))
+;;     (when (and ement-room-user-avatars avatar-url)
+;;       (plz 'get (ement--mxc-to-url avatar-url session) :as 'binary
+;;         :then (lambda (data)
+;;                 (let* ((image (create-image data nil 'data-p))
+;;                        (avatar-string (propertize " " :display `(image ,image))))
+;;                   (setf (ement-user-avatar user) avatar-string)
+;;                   (when-let (buffer (alist-get 'buffer (ement-room-local room)))
+;;                     (with-current-buffer buffer
+;;                       (ewoc-map
+;;                        (lambda (data)
+;;                          (and (ement-event-p data)
+;;                               (equal (ement-event-sender data) user)))
+;;                        ement-ewoc)))))))))
 
 (ement-defevent "m.room.name"
   (ignore session)

@@ -807,6 +807,14 @@ BODY is wrapped in a lambda form that binds `event', `room', and
     ;; So `ement-room--format-user' returns a string propertized with `help-echo' as a string.
     (concat sender "​")))
 
+(ement-room-define-event-formatter ?a
+  "Sender avatar."
+  (ignore session)
+  (if-let (avatar (ement-user-avatar (ement-event-sender event)))
+      ;; (propertize " " 'display `((:align-to left-margin) ,avatar))
+      (propertize " " 'display avatar)
+    "NOA"))
+
 (ement-room-define-event-formatter ?r
   "Reactions."
   (ignore room session)
@@ -2270,8 +2278,26 @@ function to `ement-room-event-fns', which see."
   (ement-room--insert-event event))
 
 (ement-room-defevent "m.room.member"
-  (with-silent-modifications
-    (ement-room--insert-event event)))
+  (pcase-let* (((cl-struct ement-event sender) event)
+               ((cl-struct ement-user avatar-url) sender)
+               (room ement-room))
+    (with-silent-modifications
+      (ement-room--insert-event event))
+    (when (and ement-room-user-avatars avatar-url (not (string-empty-p avatar-url)))
+      (plz 'get (ement--mxc-to-url avatar-url ement-session) :as 'binary
+        :then (lambda (data)
+                (let* ((image (ement--resize-image (create-image data nil 'data-p)
+                                                   nil (frame-char-height))))
+                  (setf (image-property image :ascent) 'center
+                        (ement-user-avatar sender) image)
+                  (message "SENDER:%S  AVATAR:%S" (ement-user-id sender) image)
+                  (when-let (buffer (alist-get 'buffer (ement-room-local room)))
+                    (with-current-buffer buffer
+                      (ewoc-map
+                       (lambda (data)
+                         (and (ement-event-p data)
+                              (equal (ement-event-sender data) sender)))
+                       ement-ewoc)))))))))
 
 (ement-room-defevent "m.room.message"
   (pcase-let* (((cl-struct ement-event content unsigned) event)
@@ -3156,6 +3182,10 @@ ROOM defaults to the value of `ement-room'."
     (propertize (ement--user-displayname-in room user)
                 'face face
                 'help-echo (ement-user-id user))))
+
+(defcustom ement-room-user-avatars t
+  "Display user avatars."
+  :type 'boolean)
 
 (cl-defun ement-room--event-mentions-user-p (event user &optional (room ement-room))
   "Return non-nil if EVENT in ROOM mentions USER."
