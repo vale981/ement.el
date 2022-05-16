@@ -59,6 +59,40 @@
 
 ;;;;; Commands
 
+(defun ement-find-room (id-or-alias session)
+  "Find room ID-OR-ALIAS on SESSION.
+If room is already joined, view its buffer.  Otherwise, try to
+preview it."
+  (interactive (list (read-string "Room ID or alias: ")
+                     (ement-complete-session)))
+  (cl-labels ((initial-sync ()
+                            (ement-api session (format "rooms/%s/initialSync" id-or-alias)
+                              :then #'initial-sync-callback))
+              (initial-sync-callback (data)
+                                     (ement--push-joined-room-events session data :status 'preview)
+                                     (ement-events id-or-alias session )
+                                     ;; TODO: The response of the /events endpoint is
+                                     ;; different than that of /sync or /initialSync, so
+                                     ;; new code will have to be written to process the
+                                     ;; events from an /events response.
+                                     ))
+    (pcase-let* (((cl-struct ement-session rooms) session)
+                 (room (or (cl-find id-or-alias rooms
+                                    :key #'ement-room-id :test #'equal)
+                           (cl-find id-or-alias rooms
+                                    :key #'ement-room-canonical-alias :test #'equal))))
+      (if room
+          (ement-view-room room session)
+        ;; Room not joined nor yet previewed: try to preview it.
+        (if (string-prefix-p "!" id-or-alias)
+            (initial-sync id-or-alias session #'initial-sync-callback)
+          ;; Get room ID for alias.
+          (ement-api session (format "directory/room/%s" id-or-alias)
+            :then (lambda (data)
+                    (pcase-let (((map ('room_id room-id)) data))
+                      (setf id-or-alias room-id)
+                      (initial-sync)))))))))
+
 (cl-defun ement-create-room
     (session &key name alias topic invite direct-p
              (then (lambda (data)
@@ -375,12 +409,15 @@ Also handle the echoed-back event."
     body))
 
 (cl-defun ement-complete-room (&key session predicate
-                                    (prompt "Room: ") (suggest t))
+                                    (prompt "Room: ") (suggest t) (require-match t))
   "Return a (room session) list selected from SESSION with completion.
 If SESSION is nil, select from rooms in all of `ement-sessions'.
 When SUGGEST, suggest current buffer's room (or a room at point
 in a room list buffer) as initial input (i.e. it should be set to
-nil when switching from one room buffer to another).  PROMPT may
+nil when switching from one room buffer to another).  When
+REQUIRE-MATCH, only allow the user to select from rooms on
+SESSION; otherwise, allow the user to enter an arbitrary
+string (e.g. an unrecognized room ID or alias).  PROMPT may
 override the default prompt.  PREDICATE may be a function to
 select which rooms are offered; it is also applied to the
 suggested room."
@@ -395,7 +432,7 @@ suggested room."
                                                        (list room session)))))
                (names (mapcar #'car name-to-room-session))
                (selected-name (completing-read
-                               prompt names nil t
+                               prompt names nil require-match
                                (when suggest
                                  (when-let ((suggestion (ement--room-at-point)))
                                    (when (or (not predicate)

@@ -650,6 +650,15 @@ Adds sender to `ement-users' when necessary."
   "Put EVENT on SESSION's events table."
   (puthash (ement-event-id event) event (ement-session-events session)))
 
+(cl-defun ement-events (room session &key from then (timeout 30000))
+  "FIXME: Docstring."
+  (pcase-let* (((cl-struct ement-room id) room)
+               (endpoint "events")
+               (query (list (list "from" from)
+                            (list "timeout" timeout))))
+    (ement-api session endpoint :version "v3" :params query
+      :then then)))
+
 ;; FIXME: These functions probably need to compare timestamps to
 ;; ensure that older events that are inserted at the head of the
 ;; events lists aren't used instead of newer ones.
