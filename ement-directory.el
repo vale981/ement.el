@@ -147,12 +147,14 @@
   "View the public room directory on SERVER with SESSION.
 Interactively, With prefix, prompt for server and number of
 rooms."
-  (interactive (let* ((session (ement-complete-session :prompt "Search on session: "))
+  (interactive (let* ((default-limit 1000)
+                      (session (ement-complete-session :prompt "Search on session: "))
                       (server (if current-prefix-arg
                                   (read-string "Search on server: ")
                                 (ement-server-name (ement-session-server session))))
-                      (limit (when current-prefix-arg
-                               (read-number "Limit number of rooms: " 1000))))
+                      (limit (if current-prefix-arg
+                                 (read-number "Limit number of rooms: " default-limit)
+                               default-limit)))
                  (list :server server :session session :limit limit)))
   (pcase-let ((revert-function (lambda (&rest _ignore)
                                  (interactive)
